@@ -120,7 +120,8 @@ class SchemaLinker:
             LinkedContext；无任何命中时候选为空（pipeline 映射 no_schema）。
         打分规则（词法版）:
             +5 表名出现在问题中; +4 同义词命中; +3 列名出现在问题中;
-            +1 表注释与问题共享关键词。得分>0 才进入候选池。
+            +2 列注释与问题共享关键词; +1 表注释/语义描述与问题共享关键词;
+            全部为 0 时触发字符 bigram 兜底召回。得分>0 才进入候选池。
         """
         query_lower = query.lower()
         tokens = set(_TOKEN_PATTERN.findall(query_lower))
@@ -146,16 +147,41 @@ class SchemaLinker:
                 if matched:
                     score += 3
                     reasons.append(f"列名命中:{column.name}")
+                # 列注释参与匹配：业务人员通常用中文描述列含义，
+                # 如 "下单时间" / "客户姓名"，这些信息不在列名里。
+                col_comment_hits = sum(
+                    1 for tk in _tokenize_cn(column.comment or "") if tk in tokens
+                )
+                if col_comment_hits:
+                    score += min(col_comment_hits, 2)
+                    reasons.append(f"列注释命中:{column.name}")
+
             comment_hits = sum(1 for tk in _tokenize_cn(table.comment) if tk in tokens)
             if comment_hits:
                 score += min(comment_hits, 3)
                 reasons.append("注释命中")
+
+            # 语义层 description 参与匹配（补充同义词覆盖不到的业务口径）。
+            sem_cfg = semantic.tables.get(name_lower)
+            if sem_cfg and sem_cfg.description:
+                desc_hits = sum(
+                    1 for tk in _tokenize_cn(sem_cfg.description) if tk in tokens
+                )
+                if desc_hits:
+                    score += min(desc_hits, 2)
+                    reasons.append("语义描述命中")
+
             if score > 0:
                 scored[name_lower] = CandidateTable(
                     table=table,
                     score=score,
                     reason=";".join(dict.fromkeys(reasons)),
                 )
+
+        # 主打分全部为 0 时，退化到字符 bigram 相似度兜底召回，
+        # 避免因为表名/同义词/列名都不在用户措辞里就返回空结果。
+        if not scored:
+            scored = self._bigram_fallback(query_lower, snapshot, semantic)
 
         ranked = sorted(scored.values(), key=lambda c: c.score, reverse=True)[
             : self.top_k_tables
@@ -193,6 +219,47 @@ class SchemaLinker:
         context.total_tokens = used_tokens
         return context
 
+    def _bigram_fallback(
+        self,
+        query_lower: str,
+        snapshot: SchemaSnapshot,
+        semantic: SemanticLayer,
+    ) -> dict[str, CandidateTable]:
+        """字符 bigram 相似度兜底：主打分为零时的最后防线。
+
+        对每张表拼接所有文本字段（表名、表注释、列名、列注释、
+        同义词、语义描述），提取字符 bigram 与查询 bigram 计算重叠率。
+        重叠率超过阈值的表以低分入池，让 LLM 有机会看到相关 schema。
+        """
+        query_bigrams = _char_bigrams(query_lower)
+        if not query_bigrams:
+            return {}
+        results: dict[str, CandidateTable] = {}
+        for name_lower, table in snapshot.tables.items():
+            parts: list[str] = [
+                name_lower,
+                table.comment or "",
+            ]
+            parts.extend(col.name for col in table.columns)
+            parts.extend(col.comment or "" for col in table.columns)
+            sem_cfg = semantic.tables.get(name_lower)
+            if sem_cfg:
+                parts.extend(sem_cfg.synonyms)
+                if sem_cfg.description:
+                    parts.append(sem_cfg.description)
+            combined = " ".join(p for p in parts if p).lower()
+            table_bigrams = _char_bigrams(combined)
+            if not table_bigrams:
+                continue
+            overlap = len(query_bigrams & table_bigrams) / len(query_bigrams)
+            if overlap > 0.12:
+                results[name_lower] = CandidateTable(
+                    table=table,
+                    score=round(overlap * 3, 2),
+                    reason=f"bigram召回({overlap:.0%})",
+                )
+        return results
+
 
 def _tokenize_cn(text: str) -> set[str]:
     """把中文/英文混合文本切成短词集合（用于注释命中打分）。"""
@@ -207,6 +274,15 @@ def _tokenize_cn(text: str) -> set[str]:
                 if len(part) <= 6:
                     words.add(part)
     return words
+
+
+def _char_bigrams(text: str) -> set[str]:
+    """提取字符 bigram 集合（用于兜底召回的相似度计算）。"""
+    bigrams: set[str] = set()
+    for tok in _TOKEN_PATTERN.findall(text):
+        for i in range(len(tok) - 1):
+            bigrams.add(tok[i : i + 2])
+    return bigrams
 
 
 def render_table_block(table: TableMeta, semantic: SemanticLayer) -> str:

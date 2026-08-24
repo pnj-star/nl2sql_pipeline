@@ -179,10 +179,17 @@ def test_trace_id_always_populated():
 
 def test_history_not_in_cache_key_by_default():
     pipe = _pipeline([])
-    m1 = pipe._cache_material(query="q", db_id="erp", history_hash="")
-    m2 = pipe._cache_material(query="q", db_id="erp", history_hash="abc123")
+    m1 = pipe._cache_material(query="q", db_id="erp", history_hash="", schema_fingerprint="fp1")
+    m2 = pipe._cache_material(query="q", db_id="erp", history_hash="abc123", schema_fingerprint="fp1")
     # C4：默认关闭 history 参与 key，两者必须相等。
     assert m1 == m2
+
+
+def test_schema_fingerprint_changes_cache_key():
+    pipe = _pipeline([])
+    m1 = pipe._cache_material(query="q", db_id="erp", history_hash="", schema_fingerprint="aaa")
+    m2 = pipe._cache_material(query="q", db_id="erp", history_hash="", schema_fingerprint="bbb")
+    assert m1 != m2
 
 
 def test_builder_assembles_with_injected_fakes():

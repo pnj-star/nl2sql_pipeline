@@ -43,7 +43,16 @@ def build_cache(
     dotenv_paths: tuple[str, ...] | list[str] | None = None,
     prefix: str = "REDIS_",
 ) -> RedisCache:
-    """构造 Redis 缓存客户端（common_core 通用实现，故障自动降级）。"""
+    """构造 Redis 缓存客户端（common_core 通用实现，故障自动降级）。
+
+    参数:
+        env: 注入配置字典；None 时 common_core 从进程环境变量读取。
+        dotenv_paths: 需要先加载的 .env 文件路径列表。
+        prefix: Redis 配置项前缀，默认 REDIS_，便于同一进程内区分服务。
+
+    返回:
+        可传给 pipeline 的 RedisCache 实例；连接故障由底层适配器降级处理。
+    """
     if dotenv_paths:
         load_env_files(*dotenv_paths, override=False)
     return RedisCache(CacheConfig.from_env(prefix=prefix, env=env))
@@ -109,9 +118,17 @@ def build_nl2sql_pipeline(
         executor: 执行器（structured_query_skill 兼容协议）；execute=true 时必须提供。
         cache: SQL 缓存；None 时禁用缓存。
         semantic: 语义层；None 时按 config.semantic_dir 加载。
-        few_shot_provider: 示例库召回函数（FR-7），签名 (question, db_id) -> list。
+        few_shot_provider: 示例库召回函数（FR-7），签名为
+            (question, db_id, min_similarity) -> [{"question", "sql"}]。
+            第三个参数来自配置，由提供方完成相似度过滤。
     返回:
         NL2SQLPipeline 实例。
+
+    装配流程:
+    1. 解析行为配置和参与缓存 key 的模型标识；
+    2. 构建 LLM、元数据提供者、schema linker、生成器和护栏；
+    3. 加载语义层，并透传 executor/cache/few-shot 等可选依赖；
+    4. 返回可直接调用 await pipeline.generate(request) 的编排对象。
     """
     resolved_env = env
     if config is None:

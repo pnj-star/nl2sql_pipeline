@@ -16,6 +16,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 import uuid
 from typing import Any, Callable
 
@@ -93,10 +94,21 @@ class NL2SQLPipeline:
     async def generate(self, request: NL2SQLRequest) -> NL2SQLResult:
         """执行一次完整的 NL2SQL 流程。
 
+        处理流程:
+        1. 生成本次 trace_id，保证即使没有接入追踪后端也能关联日志；
+        2. 进入 _generate_inner() 执行元数据召回、schema 召回、LLM 生成、
+           护栏校验和可选执行；
+        3. 任何未预期异常都在这里收敛为 ``error``，不向 MCP/LangGraph 调用方抛出。
+
         参数:
             request: 调用入参（见 types.NL2SQLRequest）。
         返回:
             NL2SQLResult，status 字段是调用方唯一需要判断的权威信号。
+
+        状态约定:
+            - generated/generated_cache/executed 属于成功路径；
+            - need_clarification/no_schema/rejected_guardrail 属于业务终止路径；
+            - error 表示内部异常，调用方不应把 message 直接当作 SQL 结果解释。
         """
         result = NL2SQLResult(
             query=request.query,
@@ -107,30 +119,70 @@ class NL2SQLPipeline:
         )
         # trace_id 由本层生成（PRD FR-9.3）：调用方未接追踪后端时也有可关联 ID。
         result.trace_id = uuid.uuid4().hex
+        t_total = time.perf_counter()
         try:
-            return await self._generate_inner(request, result)
+            final = await self._generate_inner(request, result)
         except Exception as exc:  # noqa: BLE001 - 顶层兜底，任何异常都不得逃逸
             logger.exception("nl2sql internal error request_id=%s", request.request_id)
             result.status = ERROR
             result.ok = False
             result.message = f"内部异常: {exc}"
-            return result
+            final = result
+        elapsed = round(time.perf_counter() - t_total, 4)
+        if not isinstance(final.audit, dict):
+            final.audit = {}
+        final.audit["total_s"] = elapsed
+        logger.info(
+            "nl2sql done req=%s status=%s cache_hit=%s total_s=%.4f "
+            "metadata=%.4f linking=%.4f llm=%.4f guardrail=%.4f",
+            request.request_id, final.status, final.cache_hit, elapsed,
+            final.audit.get("metadata_fetch_s", 0),
+            final.audit.get("schema_linking_s", 0),
+            final.audit.get("llm_generate_s", 0),
+            final.audit.get("guardrail_validate_s", 0),
+        )
+        return final
 
     async def _generate_inner(self, request: NL2SQLRequest, result: NL2SQLResult) -> NL2SQLResult:
-        """主流程实现（异常由 generate 外层统一兜底）。"""
+        """主流程实现（异常由 generate 外层统一兜底）。
+
+        完整流程:
+        1. 校验 db_id 是否已注册，并加载元数据快照；
+        2. 规范化多轮历史，执行 schema linking，得到候选表和 prompt 上下文；
+        3. 计算确定性槽位提示（例如时间敏感表缺少时间范围）；
+        4. 查询 SQL 缓存。命中后必须重跑护栏：即使缓存生成时合法，
+           护栏规则升级或表白名单变化后旧 SQL 也可能不再允许；
+        5. 缓存未命中时注入 few-shot 并调用 LLM；
+        6. 判断澄清路径，再执行 sqlglot 护栏校验；
+        7. 只有最终通过校验的 SQL 才写缓存；execute=true 时继续委托执行器。
+
+        参数:
+            request: 原始请求对象。
+            result: generate() 预填充上下文的返回对象，本方法原地补齐状态和结果。
+
+        返回:
+            已设置 status/sql/message/audit 等字段的同一个 result 对象。
+        """
+        t_start = time.perf_counter()
+        timings: dict[str, float] = {}
         datasource = self.config.datasources.get(request.db_id.lower())
         if datasource is None:
             return self._finish(result, NO_SCHEMA, message=f"数据源未注册: {request.db_id}")
 
+        t0 = time.perf_counter()
         snapshot = await self.metadata_provider.get_snapshot(request.db_id)
+        timings["metadata_fetch_s"] = round(time.perf_counter() - t0, 4)
         history_text, history_hash = self._build_history(request.history)
 
+        t0 = time.perf_counter()
         linked = self.linker.link(request.query, snapshot, self.semantic)
+        timings["schema_linking_s"] = round(time.perf_counter() - t0, 4)
         audit = {
             "candidate_tables_all": linked.candidate_names,
             "truncated_tables": linked.truncated_tables,
             "schema_fingerprint": snapshot.fingerprint,
             "semantic_version": self.semantic.version,
+            **timings,
         }
 
         if not linked.candidates:
@@ -149,8 +201,12 @@ class NL2SQLPipeline:
             query=request.query,
             db_id=request.db_id,
             history_hash=history_hash,
+            schema_fingerprint=snapshot.fingerprint,
         )
+        t0 = time.perf_counter()
         cached_payload = self._cache_get(material, request.tenant_id)
+        timings["cache_lookup_s"] = round(time.perf_counter() - t0, 4)
+        audit["cache_lookup_s"] = timings["cache_lookup_s"]
         if cached_payload is not None:
             outcome = self._outcome_from_cache(cached_payload)
             if outcome is not None:
@@ -177,14 +233,19 @@ class NL2SQLPipeline:
             )
 
         top_k = request.top_k_tables or self.config.top_k_tables
-        outcome = await self.generator.generate(
-            request.query,
-            schema_blocks=linked.blocks_text,
-            history_text=history_text,
-            few_shots=few_shots[:top_k],
-            extra_clarifications=slot_hints,
-            server_version=datasource.server_version,
-        )
+        t0 = time.perf_counter()
+        try:
+            outcome = await self.generator.generate(
+                request.query,
+                schema_blocks=linked.blocks_text,
+                history_text=history_text,
+                few_shots=few_shots[:top_k],
+                extra_clarifications=slot_hints,
+                server_version=datasource.server_version,
+            )
+        finally:
+            timings["llm_generate_s"] = round(time.perf_counter() - t0, 4)
+            audit["llm_generate_s"] = timings["llm_generate_s"]
         if outcome.error:
             return self._finish(result, ERROR, message=outcome.error, audit=audit)
 
@@ -201,9 +262,12 @@ class NL2SQLPipeline:
                 audit={**audit, "used_tables": outcome.used_tables},
             )
 
+        t0 = time.perf_counter()
         check = self.guardrails.validate(
             outcome.sql, allowed_tables=allowed_tables, max_rows=max_rows
         )
+        timings["guardrail_validate_s"] = round(time.perf_counter() - t0, 4)
+        audit["guardrail_validate_s"] = timings["guardrail_validate_s"]
         if not check.ok:
             return self._finish(
                 result,
@@ -229,6 +293,8 @@ class NL2SQLPipeline:
 
         if request.execute:
             return await self._execute(result, check.sql, max_rows, request, audit)
+        timings["total_s"] = round(time.perf_counter() - t_start, 4)
+        audit["total_s"] = timings["total_s"]
         return self._fill_success(result, outcome, check, status=GENERATED, audit=audit)
 
     # ---------------------------------------------------------------- 执行侧 --
@@ -240,7 +306,20 @@ class NL2SQLPipeline:
         request: NL2SQLRequest,
         audit: dict[str, Any],
     ) -> NL2SQLResult:
-        """委托执行器运行 SQL 并按 FR-6.4 做状态映射。"""
+        """委托执行器运行 SQL 并按 FR-6.4 做状态映射。
+
+        参数:
+            result: 待补齐执行结果的返回对象。
+            sql: 已经通过护栏的只读 SQL。
+            max_rows: 本次生效的行数上限；护栏阶段已用它规范化 LIMIT。
+            request: 原始请求，用于保留审计上下文。
+            audit: 当前累计的诊断信息，会原样写入 result.audit。
+
+        返回:
+            执行成功时填充 EXECUTED、rows、columns 和 truncated；
+            执行器缺失、下游异常或下游返回错误时映射为 ERROR，
+            并在安全范围内保留待执行 SQL 便于排查。
+        """
         if self.executor is None:
             return self._finish(result, ERROR, message="执行器未配置，无法 execute=true", audit=audit)
         exec_request = ExecutorQuery(sql=sql, max_rows=max_rows)
@@ -332,11 +411,25 @@ class NL2SQLPipeline:
             return ["请补充时间范围（如上个月、2025年Q3）"]
         return []
 
-    def _cache_material(self, *, query: str, db_id: str, history_hash: str) -> str:
+    def _cache_material(
+        self, *, query: str, db_id: str, history_hash: str,
+        schema_fingerprint: str = "",
+    ) -> str:
         """构造 SQL 缓存 material（进 RedisCache 的 key 组成部分）。
 
         组成（PRD FR-8）：规范化 query + db_id + semantic_version +
-        model_tag +（可选）history_hash。任一变更即天然失效。
+        schema_fingerprint + model_tag +（可选）history_hash。
+        任一变更即天然失效。
+
+        参数:
+            query: 用户原始问题；这里先做空白归一化和小写化。
+            db_id: 目标数据源 ID。
+            history_hash: 全量多轮历史摘要；是否参与 key 由配置决定。
+            schema_fingerprint: 元数据快照指纹；表/列/外键变化后会改变。
+
+        返回:
+            序列化后的缓存 material 字符串。tenant_id 不在这里拼接，
+            由 RedisCache 按租户追加隔离前缀。
         """
         normalized = re.sub(r"\s+", " ", query).strip().lower()
         payload = {
@@ -344,6 +437,7 @@ class NL2SQLPipeline:
             "q": normalized,
             "db": db_id.lower(),
             "sv": self.semantic.version,
+            "sf": schema_fingerprint,
             "m": self.generator.model_tag,
         }
         if self.config.cache_key_include_history and history_hash:
@@ -351,7 +445,15 @@ class NL2SQLPipeline:
         return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
     def _cache_get(self, material: str, tenant_id: str) -> dict[str, Any] | None:
-        """读缓存；Redis 不可用/未启用时静默返回 None。"""
+        """读取缓存的 SQL 生成结果。
+
+        参数:
+            material: _cache_material() 构造的完整检索签名。
+            tenant_id: 租户 ID，用于强制隔离不同租户的 SQL 缓存。
+
+        返回:
+            合法 JSON 字典；未启用、Redis 故障、值为空或结构非法时返回 None。
+        """
         if self.cache is None or not self.config.sql_cache_enabled:
             return None
         try:
@@ -370,7 +472,16 @@ class NL2SQLPipeline:
             return None
 
     def _cache_put(self, material: str, payload: dict[str, Any], *, tenant_id: str) -> None:
-        """写缓存；仅最终通过校验的成功结果会走到这里（失败路径不落缓存）。"""
+        """写入通过护栏校验后的 SQL 结果。
+
+        参数:
+            material: 与 _cache_get 相同的缓存签名。
+            payload: 含 sql/confidence/used_tables/assumptions 的字典。
+            tenant_id: 租户 ID，用于隔离缓存命名空间。
+
+        说明:
+            Redis 故障只记录日志并降级为无缓存，不影响本次生成结果。
+        """
         if self.cache is None or not self.config.sql_cache_enabled:
             return
         try:
@@ -386,7 +497,15 @@ class NL2SQLPipeline:
 
     @staticmethod
     def _outcome_from_cache(payload: dict[str, Any]) -> GenerationOutcome | None:
-        """把缓存 JSON 还原成 GenerationOutcome；结构不合法时返回 None 当作未命中。"""
+        """把缓存 JSON 还原成 GenerationOutcome。
+
+        参数:
+            payload: _cache_get 反序列化得到的字典。
+
+        返回:
+            GenerationOutcome。SQL 为空时返回 None；confidence 解析失败时
+            按保守默认值 0 处理，后续仍会完整重跑护栏。
+        """
         sql = str(payload.get("sql") or "").strip()
         if not sql:
             return None
@@ -410,7 +529,18 @@ class NL2SQLPipeline:
         status: str,
         audit: dict[str, Any],
     ) -> NL2SQLResult:
-        """填充生成成功（未执行）场景的公共字段。"""
+        """填充“生成成功但尚未执行”场景的公共字段。
+
+        参数:
+            result: 要补齐的返回对象。
+            outcome: LLM 生成或缓存还原出的 SQL 及置信信息。
+            check: 护栏通过后的 GuardrailResult，其规范化 SQL 是唯一可信输出。
+            status: GENERATED 或 GENERATED_CACHE。
+            audit: 召回、缓存、使用表等诊断信息。
+
+        返回:
+            补齐 status/ok/sql/confidence/used_tables/assumptions 后的 result。
+        """
         result.status = status
         result.ok = True
         result.sql = check.sql
@@ -432,7 +562,24 @@ class NL2SQLPipeline:
         confidence: float = 0.0,
         audit: dict[str, Any] | None = None,
     ) -> NL2SQLResult:
-        """终止分支的统一收口：设置状态、消息并回填审计。"""
+        """所有业务终止分支的统一收口。
+
+        该方法不会抛异常，而是把当前分支的状态、说明和已有诊断写回 result，
+        保证 MCP / agent 层始终拿到稳定的 NL2SQLResult 结构。
+
+        参数:
+            result: 要补齐的返回对象。
+            status: 本模块顶部的状态常量之一。
+            message: 中文状态说明，例如拦截原因、澄清提示或异常摘要。
+            sql: 仅在执行失败等场景回填待排查 SQL；普通拒绝路径保持空串。
+            clarify_questions: 需要用户补充的问题列表。
+            assumptions: LLM 已声明的口径假设。
+            confidence: LLM 自评置信度。
+            audit: 本分支新增的诊断字段，会与 result 中已有 audit 合并。
+
+        返回:
+            补齐后的同一个 result 对象。
+        """
         result.status = status
         result.ok = status != ERROR
         result.message = message

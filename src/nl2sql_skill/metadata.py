@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import asyncio
 import json
 import time
 from dataclasses import dataclass, field
@@ -187,10 +188,13 @@ class InformationSchemaProvider:
         返回:
             新鲜采集的 SchemaSnapshot。
         """
-        return await self._collect_from_information_schema(db_id)
+        return await asyncio.to_thread(self._collect_from_information_schema_sync, db_id)
 
-    async def _collect_from_information_schema(self, db_id: str) -> SchemaSnapshot:
+    def _collect_from_information_schema_sync(self, db_id: str) -> SchemaSnapshot:
         """连接目标 MySQL 并从 information_schema 采集表/列/外键信息。
+
+        同步方法：通过 asyncio.to_thread() 在线程池中执行，
+        避免阻塞事件循环（PRD 并发要求 ≥ 20 QPS）。
 
         参数:
             db_id: 目标数据源 ID。
