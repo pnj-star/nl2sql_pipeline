@@ -7,6 +7,12 @@ from dataclasses import dataclass, field
 
 from common_core.providers import OpenAICompatibleLLM
 
+# MySQL 5.x（含 5.7，PRD FR-4.3）受限语法子集提示：窗口函数/CTE 会直接产生不兼容 SQL。
+_MYSQL57_CONSTRAINTS = (
+    "语法子集约束（MySQL 5.x）：禁止窗口函数（OVER 子句）与公共表表达式 "
+    "（WITH/CTE），需要时改用派生表子查询；JSON 函数能力有限，优先使用普通列聚合。"
+)
+
 
 @dataclass(slots=True)
 class GenerationOutcome:
@@ -155,6 +161,19 @@ class SQLGenerator:
         )
 
     @staticmethod
+    def _syntax_constraint_part(server_version: str) -> str | None:
+        """返回 MySQL 5.x 的语法子集约束文案；8.0+ 或无法解析时返回 None。
+
+        版本归一化规则：仅 5.x 视为受限语法（保守起见 5.6/5.7 同策略），
+        其余版本一律按 MySQL 8.0 全量方言处理，避免旧库生成不兼容 SQL。
+        """
+        raw = str(server_version or "").strip()
+        head = raw.split(".")[0] if raw else ""
+        if head == "5":
+            return _MYSQL57_CONSTRAINTS
+        return None
+
+    @staticmethod
     def _build_user_prompt(
         *,
         question: str,
@@ -166,6 +185,9 @@ class SQLGenerator:
     ) -> str:
         """拼装用户侧 prompt：schema → few-shot → 历史 → 当前问题 → 槽位提醒。"""
         parts: list[str] = [f"# 数据库 schema（MySQL {server_version}）\n{schema_blocks}"]
+        constraint = SQLGenerator._syntax_constraint_part(server_version)
+        if constraint:
+            parts.append(f"# 语法子集约束\n{constraint}")
         if few_shots:
             shots = "\n".join(
                 f"问: {shot.get('question', '')}\nSQL: {shot.get('sql', '')}"

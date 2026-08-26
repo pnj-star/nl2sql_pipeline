@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-import hashlib
 import asyncio
+import hashlib
 import json
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
-from typing import Any, Protocol
 
 from .config import DataSourceConfig
+
+logger = logging.getLogger(__name__)
 
 
 class MetadataError(RuntimeError):
@@ -108,6 +110,20 @@ class SchemaSnapshot:
         )
 
 
+@dataclass(slots=True)
+class CachedSnapshot:
+    """进程内快照缓存条目。
+
+    属性:
+        expires_at: 绝对到期时间（单调时钟）。
+        snapshot: 缓存快照；stale 模式时为最近一次成功采集结果。
+        stale: 是否处于降级状态（上一次刷新失败后回退旧快照）。
+    """
+
+    expires_at: float
+    snapshot: SchemaSnapshot
+    stale: bool = False
+
 class MetadataProvider(Protocol):
     """元数据提供者协议：按 db_id 返回快照，实现方可对接 DB 或静态配置。"""
 
@@ -158,27 +174,64 @@ class InformationSchemaProvider:
         self._datasources = datasources
         self._ttl = snapshot_ttl_seconds
         self._clock = clock
-        # 缓存结构: db_id → (到期时间戳, SchemaSnapshot)；无锁设计依赖事件循环单线程语义。
-        self._cache: dict[str, tuple[float, SchemaSnapshot]] = {}
+        # 缓存结构: db_id → CachedSnapshot；无锁设计依赖事件循环单线程语义。
+        self._cache: dict[str, CachedSnapshot] = {}
+        # 并发去抖：同一 db_id 的首次采集/过期刷新只执行一次（事件循环单线程下无需外部锁）。
+        self._locks: dict[str, asyncio.Lock] = {}
 
     async def get_snapshot(self, db_id: str) -> SchemaSnapshot:
         """返回指定数据源的快照；优先命中进程内 TTL 缓存。
 
+        过期后的刷新带 single-flight 去抖：同一 db_id 的并发请求只触发一次采集。
+        采集失败但存在历史快照时，降级返回最近一次成功快照（stale 模式）并告警，
+        保证元数据服务短暂不可达时管线仍可用；全新数据源首次采集失败仍抛
+        MetadataError（此时没有可用的降级数据）。
+
         参数:
             db_id: 目标数据源 ID。
         返回:
-            SchemaSnapshot（可能来自缓存）。
+            SchemaSnapshot（可能来自缓存，也可能来自 stale 降级）。
         异常:
-            MetadataError: 数据源未注册或底层采集失败。
+            MetadataError: 数据源未注册且无历史快照，或底层采集失败。
         """
         now = self._clock()
         cached = self._cache.get(db_id)
-        if cached is not None and now < cached[0]:
-            return cached[1]
-        snapshot = await self._fetch_snapshot(db_id)
-        if self._ttl > 0:
-            self._cache[db_id] = (now + self._ttl, snapshot)
-        return snapshot
+        if cached is not None and now < cached.expires_at:
+            return cached.snapshot
+
+        lock = self._locks.setdefault(db_id, asyncio.Lock())
+        async with lock:
+            now = self._clock()
+            cached = self._cache.get(db_id)
+            if cached is not None and now < cached.expires_at:
+                return cached.snapshot
+            try:
+                snapshot = await self._fetch_snapshot(db_id)
+            except MetadataError:
+                if cached is not None:
+                    logger.warning(
+                        "metadata refresh failed for db=%s; serving stale snapshot",
+                        db_id,
+                        exc_info=True,
+                    )
+                    self._cache[db_id] = CachedSnapshot(
+                        expires_at=cached.expires_at,
+                        snapshot=cached.snapshot,
+                        stale=True,
+                    )
+                    return cached.snapshot
+                raise
+            if self._ttl > 0:
+                self._cache[db_id] = CachedSnapshot(now + self._ttl, snapshot)
+            return snapshot
+
+    def is_stale(self, db_id: str) -> bool:
+        """返回该数据源是否处于 stale 降级状态（上一次刷新失败）。
+
+        说明: 降级后下一次请求会立即重试采集；采集成功即自动恢复并清除 stale。
+        """
+        cached = self._cache.get(db_id)
+        return bool(cached and cached.stale)
 
     async def _fetch_snapshot(self, db_id: str) -> SchemaSnapshot:
         """真正执行元数据采集；子类/测试可覆写此方法替换数据来源。

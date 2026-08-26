@@ -80,6 +80,10 @@ class NL2SQLConfig:
     schema_context_max_tokens: int = 4000
     top_k_tables: int = 8
     example_min_similarity: float = 0.75
+    example_store_path: str = ""               # few-shot 示例库 JSONL 路径；空=不启用
+    cost_guard_enabled: bool = False           # EXPLAIN 成本闸门开关（PRD FR-5.3）
+    cost_threshold_rows: int = 5_000_000       # 预估扫描行数上限
+    explain_fail_policy: str = "deny"          # EXPLAIN 失败策略: deny=拒绝, allow=放行
     sql_cache_enabled: bool = True
     sql_cache_ttl_seconds: int = 86400
     # 默认关闭：全量 history 参与 key 会让多轮会话每追加一轮就 miss，
@@ -133,6 +137,10 @@ class NL2SQLConfig:
             example_min_similarity=env_float(
                 "NL2SQL_EXAMPLE_MIN_SIMILARITY", default=0.75, env=env
             ),
+            example_store_path=env_str("NL2SQL_EXAMPLE_STORE_PATH", default="", env=env),
+            cost_guard_enabled=env_bool("NL2SQL_COST_GUARD_ENABLED", default=False, env=env),
+            cost_threshold_rows=env_int("NL2SQL_COST_THRESHOLD_ROWS", default=5_000_000, env=env),
+            explain_fail_policy=env_str("NL2SQL_EXPLAIN_FAIL_POLICY", default="deny", env=env),
             sql_cache_enabled=env_bool("NL2SQL_SQL_CACHE_ENABLED", default=True, env=env),
             sql_cache_ttl_seconds=env_int(
                 "NL2SQL_SQL_CACHE_TTL_SECONDS", default=86400, env=env

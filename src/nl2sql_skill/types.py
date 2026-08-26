@@ -61,6 +61,7 @@ class NL2SQLResult:
         assumptions: LLM 声明采用的口径假设（如时间字段选择），供上层展示核对。
         clarify_questions: 需要向用户追问的问题列表；need_clarification 时非空。
         rows / columns / truncated: execute=true 时的结果集、列名、截断标记。
+        digest: execute=true 时的结果集摘要（行数 + 数值列 sum/min/max/avg）。
         cache_hit: 是否命中 SQL 缓存（executed + cache_hit=true 表示缓存 SQL 被执行）。
         tenant_id / db_id / request_id / user_id: 本次生效上下文回显。
         trace_id: 链路追踪 ID；未传时由 pipeline 自动生成。
@@ -77,6 +78,7 @@ class NL2SQLResult:
     assumptions: list[str] = field(default_factory=list)
     clarify_questions: list[str] = field(default_factory=list)
     rows: list[dict[str, Any]] = field(default_factory=list)
+    digest: dict[str, Any] | None = None
     columns: list[str] = field(default_factory=list)
     truncated: bool = False
     cache_hit: bool = False

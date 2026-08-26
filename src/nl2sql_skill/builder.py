@@ -9,6 +9,8 @@ from common_core.config import CacheConfig, ConfigError, LLMConfig, load_env_fil
 from common_core.providers import OpenAICompatibleLLM, RedisCache
 
 from .config import NL2SQLConfig
+from .cost_guard import MySQLExplainCostGuard
+from .example_store import ExampleStore
 from .generator import SQLGenerator
 from .guardrails import GuardrailValidator
 from .linking import SchemaLinker
@@ -80,6 +82,17 @@ def build_metadata_provider(config: NL2SQLConfig) -> InformationSchemaProvider:
     return InformationSchemaProvider(config.datasources)
 
 
+def build_example_store(config: NL2SQLConfig) -> ExampleStore | None:
+    """按配置构造 few-shot 示例库（FR-7 读侧）；路径未配置时返回 None。"""
+    if not config.example_store_path:
+        return None
+    store = ExampleStore.from_path(
+        config.example_store_path,
+        min_similarity=config.example_min_similarity,
+    )
+    return store
+
+
 def build_semantic_layer(config: NL2SQLConfig) -> SemanticLayer:
     """从配置目录加载语义层；目录未配置/为空时返回空语义层。"""
     return load_semantic_layer(config.semantic_dir or None)
@@ -108,6 +121,7 @@ def build_nl2sql_pipeline(
     cache: RedisCache | None = None,
     semantic: SemanticLayer | None = None,
     few_shot_provider: Any | None = None,
+    cost_guard: Any | None = None,
 ) -> NL2SQLPipeline:
     """一步装配完整 pipeline；所有依赖均可显式注入覆盖（测试友好）。
 
@@ -120,7 +134,8 @@ def build_nl2sql_pipeline(
         semantic: 语义层；None 时按 config.semantic_dir 加载。
         few_shot_provider: 示例库召回函数（FR-7），签名为
             (question, db_id, min_similarity) -> [{"question", "sql"}]。
-            第三个参数来自配置，由提供方完成相似度过滤。
+            第三个参数来自配置，由提供方完成相似度过滤；提供方若接受
+            可选关键字 tenant_id，pipeline 会透传租户用于隔离召回。
     返回:
         NL2SQLPipeline 实例。
 
@@ -137,6 +152,18 @@ def build_nl2sql_pipeline(
             # .env 已载入进程环境；后续 LLMConfig 直接读 os.environ 即可。
             resolved_env = None
     tag = model_tag_for(env=resolved_env)
+    resolved_few_shot = few_shot_provider
+    if resolved_few_shot is None:
+        example_store = build_example_store(config)
+        if example_store is not None:
+            resolved_few_shot = example_store.search
+    resolved_cost_guard = cost_guard
+    if resolved_cost_guard is None and config.cost_guard_enabled:
+        resolved_cost_guard = MySQLExplainCostGuard(
+            config.datasources,
+            threshold=config.cost_threshold_rows,
+            fail_policy=config.explain_fail_policy,
+        )
     generator = SQLGenerator(
         llm=llm if llm is not None else build_llm(env=resolved_env),
         model_tag=tag,
@@ -153,5 +180,6 @@ def build_nl2sql_pipeline(
         semantic=semantic if semantic is not None else build_semantic_layer(config),
         executor=executor,
         cache=cache,
-        few_shot_provider=few_shot_provider,
+        few_shot_provider=resolved_few_shot,
+        cost_guard=resolved_cost_guard,
     )

@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import logging
 import re
@@ -26,7 +27,7 @@ from .config import NL2SQLConfig
 from .generator import GenerationOutcome, SQLGenerator
 from .guardrails import GuardrailValidator
 from .linking import LinkedContext, SchemaLinker, estimate_tokens
-from .metadata import MetadataError, MetadataProvider, SchemaSnapshot
+from .metadata import MetadataProvider, SchemaSnapshot
 from .semantic import SemanticLayer
 from .types import (
     ERROR,
@@ -48,6 +49,50 @@ _TIME_WORDS = ("今天", "昨天", "本周", "上周", "本月", "上月", "上�
 _DATE_PATTERN = re.compile(r"\d{4}[-/年]\d{1,2}[-/月]")
 
 
+
+def _build_result_digest(rows: list[dict[str, Any]], columns: list[str]) -> dict[str, Any]:
+    """FR-6.3：对结果集做轻量数值摘要，供上层直接展示概览。
+
+    返回 {"row_count", "numeric": {列名: {sum,min,max,avg}}}；
+    仅统计数值列（排除 bool），聚合值四舍五入到 4 位小数，保证 JSON 可序列化。
+    """
+    digest: dict[str, Any] = {"row_count": len(rows)}
+    numeric: dict[str, dict[str, float]] = {}
+    for col in columns:
+        values: list[float] = []
+        for row in rows:
+            value = row.get(col)
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, (int, float)):
+                values.append(float(value))
+        if values:
+            numeric[col] = {
+                "sum": round(sum(values), 4),
+                "min": round(min(values), 4),
+                "max": round(max(values), 4),
+                "avg": round(sum(values) / len(values), 4),
+            }
+    if numeric:
+        digest["numeric"] = numeric
+    return digest
+
+
+def _callable_accepts_kwarg(fn: Callable[..., Any] | None, name: str) -> bool:
+    """探测可调用对象是否接受指定关键字参数（用于可选能力透传）。"""
+    if fn is None:
+        return False
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return False
+    for param in sig.parameters.values():
+        if param.name == name:
+            return True
+        if param.kind is inspect.Parameter.VAR_KEYWORD:
+            return True
+    return False
+
 class NL2SQLPipeline:
     """可复用的 NL2SQL pipeline；依赖全部通过构造注入，便于测试替换。"""
 
@@ -62,6 +107,7 @@ class NL2SQLPipeline:
         semantic: SemanticLayer | None = None,
         executor: Any = None,
         cache: RedisCache | None = None,
+        cost_guard: Any | None = None,
         few_shot_provider: Callable[[str, str, float], list[dict[str, str]]] | None = None,
     ) -> None:
         """初始化 pipeline。
@@ -88,6 +134,10 @@ class NL2SQLPipeline:
         self.semantic = semantic or SemanticLayer(version="empty")
         self.executor = executor
         self.cache = cache
+        self.cost_guard = cost_guard
+        self._provider_accepts_tenant = _callable_accepts_kwarg(
+            few_shot_provider, "tenant_id"
+        )
         self.few_shot_provider = few_shot_provider
 
     # ------------------------------------------------------------------ 入口 --
@@ -184,6 +234,9 @@ class NL2SQLPipeline:
             "semantic_version": self.semantic.version,
             **timings,
         }
+        stale_probe = getattr(self.metadata_provider, "is_stale", None)
+        if callable(stale_probe):
+            audit["schema_stale"] = bool(stale_probe(request.db_id))
 
         if not linked.candidates:
             return self._finish(result, NO_SCHEMA, message="没有召回到与问题相关的表", audit=audit)
@@ -217,6 +270,9 @@ class NL2SQLPipeline:
                     result.cache_hit = True
                     audit["cache_hit"] = True
                     if request.execute:
+                        blocked = await self._cost_gate(result, check.sql, max_rows, request, audit)
+                        if blocked is not None:
+                            return blocked
                         return await self._execute(result, check.sql, max_rows, request, audit)
                     return self._fill_success(result, outcome, check, status=GENERATED_CACHE, audit=audit)
                 logger.warning(
@@ -228,9 +284,17 @@ class NL2SQLPipeline:
         if self.few_shot_provider is not None:
             # 相似度阈值由配置下发（NL2SQL_EXAMPLE_MIN_SIMILARITY），
             # 提供方实现向量召回并自行完成阈值过滤，低于阈值的示例不得注入。
-            few_shots = self.few_shot_provider(
-                request.query, request.db_id, self.config.example_min_similarity
-            )
+            if self._provider_accepts_tenant:
+                few_shots = self.few_shot_provider(
+                    request.query,
+                    request.db_id,
+                    self.config.example_min_similarity,
+                    tenant_id=request.tenant_id,
+                )
+            else:
+                few_shots = self.few_shot_provider(
+                    request.query, request.db_id, self.config.example_min_similarity
+                )
 
         top_k = request.top_k_tables or self.config.top_k_tables
         t0 = time.perf_counter()
@@ -278,6 +342,12 @@ class NL2SQLPipeline:
                 audit={**audit, "used_tables_declared": outcome.used_tables, "guardrail_reason": check.reason},
             )
 
+        if request.execute:
+            blocked = await self._cost_gate(result, check.sql, max_rows, request, audit)
+            if blocked is not None:
+                # 成本拦截属于护栏类结果：一律不写缓存（PRD FR-8 缓存规范）。
+                return blocked
+
         self._cache_put(
             material,
             {
@@ -297,6 +367,35 @@ class NL2SQLPipeline:
         audit["total_s"] = timings["total_s"]
         return self._fill_success(result, outcome, check, status=GENERATED, audit=audit)
 
+    async def _cost_gate(
+        self,
+        result: NL2SQLResult,
+        sql: str,
+        max_rows: int,
+        request: NL2SQLRequest,
+        audit: dict[str, Any],
+    ) -> NL2SQLResult | None:
+        """EXPLAIN 成本闸门（FR-5.3）：execute=true 前置检查。
+
+        返回 None 表示放行；被拦截时返回已收口的 rejected_guardrail 结果。
+        未配置 cost_guard 时恒放行，保持零成本兼容。
+        """
+        if self.cost_guard is None:
+            return None
+        t0 = time.perf_counter()
+        decision = await self.cost_guard.evaluate(request.db_id, sql)
+        audit["cost_gate_s"] = round(time.perf_counter() - t0, 4)
+        audit["cost_gate"] = "allowed" if decision.allowed else "blocked"
+        audit["cost_estimated_rows"] = decision.estimated_rows
+        if decision.allowed:
+            return None
+        return self._finish(
+            result,
+            REJECTED_GUARDRAIL,
+            message=f"成本闸门拒绝执行: {decision.reason}",
+            sql=sql,
+            audit=audit,
+        )
     # ---------------------------------------------------------------- 执行侧 --
     async def _execute(
         self,
@@ -342,6 +441,7 @@ class NL2SQLPipeline:
         result.rows = rows
         result.columns = columns
         result.truncated = bool(getattr(raw, "truncated", False))
+        result.digest = _build_result_digest(rows, columns)
         result.audit = audit
         return result
 
