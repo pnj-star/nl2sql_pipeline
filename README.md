@@ -4,9 +4,22 @@
 
 本文件面向想复用 / 扩展 / 部署该组件的开发者。调用方（agent / MCP client）只看 [SKILL.md](SKILL.md) 的调用契约即可。
 
-## 架构总览
 
-处理流程：
+## 能力
+
+- 多数据源注册与 information_schema 元数据采集（TTL 快照缓存 + stale 降级 + single-flight 去抖）。
+- Schema Linking：词法匹配 + 列注释 + 语义层描述 + 字符 bigram 兜底召回；外键一跳扩展支撑 JOIN 推理。
+- LLM 生成结构化 JSON（sql / confidence / used_tables / assumptions / clarify_questions）。
+- sqlglot AST 安全护栏：SELECT/WITH 白名单、写操作/DDL/权限/文件导出拦截、强制 LIMIT、单语句校验。
+- SQL 缓存：query + db_id + semantic_version + schema_fingerprint + model_tag 联合 key，命中后仍重跑护栏。
+- 确定性槽位校验（时间敏感表缺时间范围时触发澄清）；多轮上下文预算截断。
+- 可选执行编排：委托外部执行器，返回结果集 + 数值摘要 digest（行数 + sum/min/max/avg）。
+- EXPLAIN 成本闸门：execute=true 前评估预估扫描行数，超阈值拒绝执行；失败按 deny/allow 策略降级。
+- few-shot 示例库（JSONL 读侧）：db/tenant 隔离 + 相似度排序取 top_k。
+- MySQL 5.x 语法子集提示：5.x 数据源禁止窗口函数/CTE，prompt 注入派生表替代约束。
+
+
+## 处理流程
 
 ```mermaid
 flowchart TD
@@ -33,19 +46,6 @@ flowchart TD
     Q -- 成功 --> OK[status = executed rows + digest]
 ```
 
-
-## 能力
-
-- 多数据源注册与 information_schema 元数据采集（TTL 快照缓存 + stale 降级 + single-flight 去抖）。
-- Schema Linking：词法匹配 + 列注释 + 语义层描述 + 字符 bigram 兜底召回；外键一跳扩展支撑 JOIN 推理。
-- LLM 生成结构化 JSON（sql / confidence / used_tables / assumptions / clarify_questions）。
-- sqlglot AST 安全护栏：SELECT/WITH 白名单、写操作/DDL/权限/文件导出拦截、强制 LIMIT、单语句校验。
-- SQL 缓存：query + db_id + semantic_version + schema_fingerprint + model_tag 联合 key，命中后仍重跑护栏。
-- 确定性槽位校验（时间敏感表缺时间范围时触发澄清）；多轮上下文预算截断。
-- 可选执行编排：委托外部执行器，返回结果集 + 数值摘要 digest（行数 + sum/min/max/avg）。
-- EXPLAIN 成本闸门：execute=true 前评估预估扫描行数，超阈值拒绝执行；失败按 deny/allow 策略降级。
-- few-shot 示例库（JSONL 读侧）：db/tenant 隔离 + 相似度排序取 top_k。
-- MySQL 5.x 语法子集提示：5.x 数据源禁止窗口函数/CTE，prompt 注入派生表替代约束。
 
 ## 文件布局
 
