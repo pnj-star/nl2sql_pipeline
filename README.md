@@ -6,7 +6,7 @@
 
 ## 架构总览
 
-完整调用链与状态流转：
+处理流程：
 
 ```mermaid
 flowchart TD
@@ -33,26 +33,6 @@ flowchart TD
     Q -- 成功 --> OK[status = executed rows + digest]
 ```
 
-组件依赖（均通过构造注入，可单独替换）：
-
-```mermaid
-flowchart LR
-    subgraph nl2sql_skill
-        config --> builder
-        builder --> pipeline
-        metadata --> pipeline
-        linking --> pipeline
-        semantic --> pipeline
-        generator --> pipeline
-        guardrails --> pipeline
-        cost_guard --> pipeline
-        example_store --> pipeline
-        mcp_server --> pipeline
-        pipeline --> types
-    end
-    common_core[common_core 公共组件] --> builder
-    common_core --> generator
-```
 
 ## 能力
 
