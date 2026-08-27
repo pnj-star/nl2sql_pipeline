@@ -47,24 +47,6 @@ flowchart TD
 ```
 
 
-## 文件布局
-
-| 文件 | 职责 |
-| --- | --- |
-| `src/nl2sql_skill/builder.py` | 从环境变量/显式入参装配完整 pipeline |
-| `src/nl2sql_skill/pipeline.py` | `NL2SQLPipeline` 总编排：元数据 → 召回 → 生成 → 护栏 → 执行 |
-| `src/nl2sql_skill/metadata.py` | information_schema 采集 + SchemaSnapshot fingerprint + TTL 缓存 + stale 降级 |
-| `src/nl2sql_skill/linking.py` | Schema Linker（词法打分、bigram 兜底、token 预算裁剪） |
-| `src/nl2sql_skill/semantic.py` | 语义层加载（同义词、描述、时间过滤声明），JSON/YAML 双格式 |
-| `src/nl2sql_skill/generator.py` | prompt 组装 + LLM 调用 + JSON 解析修复重试 + 5.x 语法子集提示 |
-| `src/nl2sql_skill/guardrails.py` | sqlglot AST 校验器（写操作/越权/文件导出等拦截） |
-| `src/nl2sql_skill/cost_guard.py` | EXPLAIN 成本闸门（FR-5.3） |
-| `src/nl2sql_skill/example_store.py` | few-shot 示例库读侧（FR-7） |
-| `src/nl2sql_skill/config.py` | 数据源注册表与行为开关的环境变量装载 |
-| `src/nl2sql_skill/types.py` | NL2SQLRequest / NL2SQLResult dataclass 与状态码 |
-| `src/nl2sql_skill/mcp.py` / `mcp_server.py` | MCP 服务入口与工具定义（`nl2sql_generate` / `/health`） |
-| `tests/` | 106 个单元测试（护栏负样本、成本闸门、示例库、5.x 语法、digest、元数据降级） |
-
 ## 快速开始
 
 ### 安装
@@ -90,6 +72,8 @@ pip install -e ".[sql,semantic,mcp,test]"
 复制 `.env.example` 为 `.env` 并按环境填写：LLM 地址/密钥/模型、`NL2SQL_DB_<ID>_DSN` 只读连接串。完整变量说明见 [.env.example](.env.example)。
 
 ### 最小示例
+
+完整可运行示例（建表 SQL、语义层、few-shot 样例、执行 demo）见 [examples/](examples/README.md)。
 
 ```python
 import asyncio
@@ -141,6 +125,33 @@ nl2sql-skill-mcp --env-file .env --transport streamable-http --port 8000  # HTTP
 - 鉴权沿用仓库统一约定（`common_core.mcp_auth`）：`AUTH_MODE=jwt` 时校验 JWT 的 `tenant_id` / `kb_id`（承载 `db_id`）claims 与请求一致；`disabled` 模式仍强制要求作用域参数齐全。
 - `/health` 暴露脱敏配置状态与指纹；`METRICS_ENABLED=true` 时在 `METRICS_PORT`（默认 9090）暴露 Prometheus 指标。
 - 可传入上游 W3C `traceparent` 串联分布式链路，响应携带 `trace_id`；未接追踪后端时由 pipeline 自动生成。
+
+## Docker 运行
+
+镜像默认以 `streamable-http` 方式监听 `0.0.0.0:8000`，入口命令是 `nl2sql-skill-mcp`。
+
+```bash
+# 本地构建
+docker build -t nl2sql-skill:0.1.0 .
+
+# .env 至少配置 LLM 与 NL2SQL_DB_<ID>_DSN
+docker run --rm -p 8000:8000 --env-file .env nl2sql-skill:0.1.0
+```
+
+推送 tag `v0.1.0` 后可从 GHCR 直接拉取：
+
+```bash
+docker pull ghcr.io/<owner>/nl2sql_pipeline:v0.1.0
+docker run --rm -p 8000:8000 --env-file .env ghcr.io/<owner>/nl2sql_pipeline:v0.1.0
+```
+
+注意：
+
+- MySQL / LLM 地址要能被容器访问：macOS / Windows 上访问宿主机用 `host.docker.internal`，Linux 用 `--network host` 或宿主内网 IP。
+- 启用语义层 / few-shot 时把目录挂进容器，并让 `NL2SQL_SEMANTIC_DIR` / `NL2SQL_EXAMPLE_STORE_PATH` 指向容器内路径。
+- 健康检查：`curl http://localhost:8000/health`；需要 Prometheus 指标时加 `-e METRICS_ENABLED=true -e METRICS_BIND=0.0.0.0 -p 9090:9090`。
+- 需要 MCP stdio 时覆盖 CMD：`docker run -it --rm --env-file .env <image> --transport stdio`。
+- `common_core` 已发布到 PyPI，构建镜像时从 PyPI 安装，不再依赖克隆 GitHub 仓库。
 
 ## 配置项
 
