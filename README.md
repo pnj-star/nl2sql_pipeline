@@ -132,17 +132,17 @@ nl2sql-skill-mcp --env-file .env --transport streamable-http --port 8000  # HTTP
 
 ```bash
 # 本地构建
-docker build -t nl2sql-skill:0.1.0 .
+docker build -t nl2sql-skill:0.1.1 .
 
 # .env 至少配置 LLM 与 NL2SQL_DB_<ID>_DSN
-docker run --rm -p 8000:8000 --env-file .env nl2sql-skill:0.1.0
+docker run --rm -p 8000:8000 --env-file .env nl2sql-skill:0.1.1
 ```
 
-推送 tag `v0.1.0` 后可从 GHCR 直接拉取：
+推送 tag `v0.1.1` 后可从 GHCR 直接拉取：
 
 ```bash
-docker pull ghcr.io/<owner>/nl2sql_pipeline:v0.1.0
-docker run --rm -p 8000:8000 --env-file .env ghcr.io/<owner>/nl2sql_pipeline:v0.1.0
+docker pull ghcr.io/<owner>/nl2sql_pipeline:v0.1.1
+docker run --rm -p 8000:8000 --env-file .env ghcr.io/<owner>/nl2sql_pipeline:v0.1.1
 ```
 
 注意：
