@@ -1,0 +1,2 @@
+{"question": "黑木耳的佣金比例是多少", "sql": "SELECT cr.rate FROM commission_rules cr JOIN products p ON p.id = cr.product_id WHERE p.name = '黑木耳'", "db_id": "commerce", "verified": true, "tenant_id": ""}
+{"question": "8月香菇抽成多少", "sql": "SELECT cr.rate FROM commission_rules cr JOIN products p ON p.id = cr.product_id WHERE p.name = '香菇' AND cr.effective_from <= '2026-08-31' AND (cr.effective_to IS NULL OR cr.effective_to >= '2026-08-01')", "db_id": "commerce", "verified": true, "tenant_id": ""}

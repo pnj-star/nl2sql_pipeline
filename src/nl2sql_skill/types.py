@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
-# ---------------------------------------------------------------- 状态码 ----
-# 与 PRD §5.1 的 status 枚举一一对应；调用方（上层 LangGraph 节点）据此路由。
+# ------------------------------状态码--------------------------------------
+# 与 PRD 5.1 的 status 枚举一一对应；调用方（上层 LangGraph 节点）据此路由。
 GENERATED = "generated"                    # 生成并通过全部校验（未执行）
 GENERATED_CACHE = "generated_cache"        # 未执行且命中 SQL 缓存
 EXECUTED = "executed"                      # execute=true 且执行成功（含缓存命中后执行）

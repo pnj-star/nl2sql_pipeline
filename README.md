@@ -87,7 +87,6 @@ Copy-Item .env.example .env   # Windows；Linux/macOS 用 cp .env.example .env
 ```
 
 最小调用示例：
-
 ```python
 import asyncio
 from nl2sql_skill.builder import build_nl2sql_pipeline
@@ -114,75 +113,16 @@ nl2sql-skill-mcp --env-file .env --transport streamable-http --port 8000
 ```
 
 如果提示找不到 `nl2sql-skill-mcp`，确认已激活虚拟环境，或改用等价命令：
-
 ```bash
 python -m nl2sql_skill.mcp --env-file .env --transport streamable-http --port 8000
 ```
 
-## 配置项
-
-完整变量说明见 [.env.example](.env.example)，关键变量速查：
-
-| 变量 | 默认 | 说明 |
-| --- | --- | --- |
-| `NL2SQL_LLM_BASE_URL` | — | OpenAI 兼容接口地址 |
-| `NL2SQL_LLM_API_KEY` | — | 接口密钥 |
-| `NL2SQL_LLM_MODEL` | — | 模型名 |
-| `NL2SQL_DB_<ID>_DSN` | — | MySQL 只读账号连接串 |
-| `NL2SQL_DB_<ID>_SERVER_VERSION` | 8.0 | 5.x 时注入受限语法子集提示 |
-| `NL2SQL_DB_<ID>_VISIBLE_TABLES` | 空=全部 | 表白名单 |
-| `AUTH_MODE` | jwt | disabled=本地调试；jwt=校验 JWT |
-| `NL2SQL_EXAMPLE_STORE_PATH` | 空=不启用 | few-shot 示例库 JSONL 路径 |
-| `NL2SQL_COST_GUARD_ENABLED` | false | EXPLAIN 成本闸门开关 |
-| `NL2SQL_COST_THRESHOLD_ROWS` | 5000000 | 预估扫描行数上限 |
-| `NL2SQL_EXPLAIN_FAIL_POLICY` | deny | EXPLAIN 失败策略 deny/allow |
-| `NL2SQL_SEMANTIC_DIR` | 空=不启用 | 语义层 YAML/JSON 目录 |
-| `NL2SQL_CLARIFY_THRESHOLD` | 0.75 | 置信阈值 |
-| `NL2SQL_MAX_ROWS` | 200 | 行数上限 |
-| `NL2SQL_SQL_CACHE_ENABLED` | true | SQL 缓存开关 |
-| `NL2SQL_SQL_CACHE_TTL_SECONDS` | 86400 | 缓存 TTL |
-
-## 代码修改后如何发布新版本
-
-1. 修改代码，并在 `pyproject.toml` 中把 `version` 升到新版本（例如 `0.1.5`），README 镜像 tag 同步更新。
-2. 本地先验证：`docker build -t nl2sql-skill:test .`，再 `docker run --rm -p 8000:8000 --env-file .env nl2sql-skill:test`。
-3. 发布到 GitHub 并触发 Docker 自动构建：
-
-```bash
-git add 本次改动的文件
-git commit -m "fix: 说明这次改动"
-git push
-git tag v0.1.5
-git push origin v0.1.5
-```
-
-命令含义：
-
-| 命令 | 作用 |
-| --- | --- |
-| `git add` | 把本次改动加入暂存区 |
-| `git commit -m "..."` | 在本地保存一个提交 |
-| `git push` | 把提交上传到 GitHub |
-| `git tag v0.1.5` | 给当前提交打发布标记 |
-| `git push origin v0.1.5` | 推送标记，触发 Docker 工作流自动构建并发布到 GHCR |
-
-等 GitHub Actions 的 `Docker` 工作流跑绿后，把 Docker 命令里的版本号换成 `v0.1.5` 即可拉取新镜像。
-
-提醒：
-- `git add` 后面必须写真实文件名，例如 `git add README.md pyproject.toml src/nl2sql_skill/mcp.py`，不要照抄示例里的“本次改动的文件”。
-- 顺序不要乱：先 `git add` 和 `git commit`，再 `git push`，最后才 `git tag` 并 `git push origin <tag>`。
-- 如果 tag 提前误推了，先删除再重建：`git tag -d v0.1.5`、`git push origin :refs/tags/v0.1.5`，新提交完成后重新打 tag 并推送。
-
-注意：如果 `common_core` 依赖也改了，必须先发布 `common_core` 到 PyPI，再发布本包，顺序不能反。
-
 ## 测试
-
 ```bash
 python -m pytest tests -q
 ```
 
 ## 边界与 Roadmap
-
 - 不包含 LangGraph 编排，也不做回答文本生成
 - 当前优先支持 MySQL 5.7 / 8.0，PostgreSQL / ClickHouse 后续规划
 - 列级权限依赖外部系统，当前通过 `visible_tables` 做表级过滤
