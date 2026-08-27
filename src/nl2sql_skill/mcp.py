@@ -9,9 +9,12 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 if not __package__:
     # 脚本方式直接运行（如 PyCharm Run 按钮）时，Python 会把脚本所在目录
@@ -59,12 +62,7 @@ def _build_runtime(env_file: str | None) -> tuple[Any, str]:
 
     缺少数据源注册或 LLM 必填项时 fail-fast，拒绝带病运行。
     """
-    from common_core.config import (
-        RuntimeConfig,
-        load_env_files,
-        log_config_audit,
-        resolve_env_file,
-    )
+    from common_core.config import load_env_files, resolve_env_file
 
     from .builder import build_llm
     from .config import NL2SQLConfig
@@ -86,10 +84,10 @@ def _build_runtime(env_file: str | None) -> tuple[Any, str]:
     # LLM 必填项（BASE_URL / MODEL）缺失时 build_llm 抛 ConfigError，fail-fast。
     build_llm()
     source = "env:" + resolved if resolved else "process-env"
-    log_config_audit(
-        RuntimeConfig.from_env(),
-        source=source,
-        require_llm=True,
+    logger.info(
+        "config source=%s datasources=%s",
+        source,
+        ",".join(sorted(config.datasources)),
     )
     return config, source
 
@@ -105,8 +103,6 @@ def main() -> None:
     缺少必需配置时快速报错终止。
     """
     import argparse
-
-    from common_core.auth import AuthConfig
 
     default_transport = "streamable-http" if not __package__ else "stdio"
     parser = argparse.ArgumentParser(prog="nl2sql-skill-mcp")
@@ -143,7 +139,6 @@ def main() -> None:
     args = parser.parse_args()
 
     config, config_source = _build_runtime(args.env_file)
-    AuthConfig.from_env().validate()
     metrics = Observability.from_env()
     metrics.start_server()
 
