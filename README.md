@@ -52,9 +52,9 @@ docker pull ghcr.io/pnj-star/nl2sql_pipeline:v0.1.4
 准备 `.env`（复制 [.env.example](.env.example) 后填写），至少包含：
 
 ```text
-NL2SQL_LLM_BASE_URL=https://api.openai.com/v1
-NL2SQL_LLM_API_KEY=your-api-key
-NL2SQL_LLM_MODEL=gpt-4o-mini
+NL2SQL_LLM_BASE_URL=
+NL2SQL_LLM_API_KEY=
+NL2SQL_LLM_MODEL=
 NL2SQL_DB_ERP_DSN=mysql://ro_user:ro_pass@host.docker.internal:3307/erp_db
 AUTH_MODE=disabled
 ```
@@ -80,8 +80,6 @@ docker stop nl2sql
 
 ```bash
 python -m venv .venv
-# Windows: .\.venv\Scripts\activate
-# Linux/macOS: source .venv/bin/activate
 pip install -e ".[sql,semantic,mcp,test]"
 Copy-Item .env.example .env   # Windows；Linux/macOS 用 cp .env.example .env
 ```
