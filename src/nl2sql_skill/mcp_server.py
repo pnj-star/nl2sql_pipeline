@@ -99,7 +99,7 @@ def _load_pipeline(pipeline: NL2SQLPipeline | None, metrics: Any = None) -> NL2S
     """返回显式传入的管线，否则从环境构建一个默认管线。"""
     if pipeline is not None:
         return pipeline
-    return build_nl2sql_pipeline(metrics=metrics)
+    return build_nl2sql_pipeline()
 
 
 def _transport_auth_token() -> str | None:
