@@ -11,6 +11,7 @@ from common_core.providers import OpenAICompatibleLLM, RedisCache
 from .config import NL2SQLConfig
 from .cost_guard import MySQLExplainCostGuard
 from .example_store import ExampleStore
+from .executor import DataSourceMySQLExecutor
 from .generator import SQLGenerator
 from .guardrails import GuardrailValidator
 from .linking import SchemaLinker
@@ -157,6 +158,9 @@ def build_nl2sql_pipeline(
         example_store = build_example_store(config)
         if example_store is not None:
             resolved_few_shot = example_store.search
+    resolved_executor = executor
+    if resolved_executor is None and config.executor_enabled:
+        resolved_executor = DataSourceMySQLExecutor(config.datasources)
     resolved_cost_guard = cost_guard
     if resolved_cost_guard is None and config.cost_guard_enabled:
         resolved_cost_guard = MySQLExplainCostGuard(
@@ -178,7 +182,7 @@ def build_nl2sql_pipeline(
         generator=generator,
         guardrails=GuardrailValidator(),
         semantic=semantic if semantic is not None else build_semantic_layer(config),
-        executor=executor,
+        executor=resolved_executor,
         cache=cache,
         few_shot_provider=resolved_few_shot,
         cost_guard=resolved_cost_guard,

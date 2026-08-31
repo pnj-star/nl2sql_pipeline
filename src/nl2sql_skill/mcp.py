@@ -64,8 +64,12 @@ def _build_runtime(env_file: str | None) -> tuple[Any, str]:
     """
     from common_core.config import load_env_files, resolve_env_file
 
-    from .builder import build_llm
-    from .config import NL2SQLConfig
+    if __package__:
+        from .builder import build_llm
+        from .config import NL2SQLConfig
+    else:
+        from nl2sql_skill.builder import build_llm
+        from nl2sql_skill.config import NL2SQLConfig
 
     resolved = resolve_env_file(env_file, env_key="NL2SQL_ENV_FILE")
     if resolved is None:

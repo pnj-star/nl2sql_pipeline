@@ -81,6 +81,7 @@ class NL2SQLConfig:
     top_k_tables: int = 8
     example_min_similarity: float = 0.75
     example_store_path: str = ""               # few-shot 示例库 JSONL 路径；空=不启用
+    executor_enabled: bool = False             # execute=true 时启用内置只读执行器
     cost_guard_enabled: bool = False           # EXPLAIN 成本闸门开关（PRD FR-5.3）
     cost_threshold_rows: int = 5_000_000       # 预估扫描行数上限
     explain_fail_policy: str = "deny"          # EXPLAIN 失败策略: deny=拒绝, allow=放行
@@ -126,6 +127,7 @@ class NL2SQLConfig:
             )
         return cls(
             datasources=datasources,
+            executor_enabled=env_bool("NL2SQL_EXECUTOR_ENABLED", default=False, env=env),
             semantic_dir=env_str("NL2SQL_SEMANTIC_DIR", default="", env=env),
             clarify_threshold=env_float("NL2SQL_CLARIFY_THRESHOLD", default=0.75, env=env),
             max_rows=env_int("NL2SQL_MAX_ROWS", default=200, env=env),

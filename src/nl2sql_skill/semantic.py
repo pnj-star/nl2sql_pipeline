@@ -66,6 +66,9 @@ def load_semantic_layer(directory: str | Path | None) -> SemanticLayer:
     if not directory:
         return SemanticLayer(version="empty")
     root = Path(directory)
+    if not root.is_absolute():
+        # 相对路径按 nl2sql_skill 项目根目录解析，避免随启动目录变化。
+        root = Path(__file__).resolve().parents[2] / root
     if not root.is_dir():
         return SemanticLayer(version="missing")
 

@@ -421,7 +421,7 @@ class NL2SQLPipeline:
         """
         if self.executor is None:
             return self._finish(result, ERROR, message="执行器未配置，无法 execute=true", audit=audit)
-        exec_request = ExecutorQuery(sql=sql, max_rows=max_rows)
+        exec_request = ExecutorQuery(sql=sql, max_rows=max_rows, db_id=request.db_id)
         try:
             raw = await self.executor.aquery(exec_request)
         except Exception as exc:  # noqa: BLE001 - 下游任何异常都归一为 error

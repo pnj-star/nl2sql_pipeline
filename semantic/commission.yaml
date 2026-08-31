@@ -1,0 +1,13 @@
+# 语义层：给多张表配同义词与说明，让"抽成/提成/利润"等问法也能命中正确表。
+# 格式约定：{"表名": {"synonyms": [...], "description": "...", "requires_time_filter": bool}}
+# 注意：NL2SQL_SEMANTIC_DIR 指向本文件所在目录（可放多个 yaml，会合并）。
+
+products:
+  synonyms: ["商品", "货品", "产品", "SKU", "农产品"]
+  description: "在售产品主表，产品名称在 name 字段，例如黑木耳、香菇、银耳、红枣"
+  requires_time_filter: false
+
+commission_rules:
+  synonyms: ["佣金", "提成", "抽成", "返点", "利润分成", "抽佣"]
+  description: "产品佣金规则：rule_type=1 按销售额比例（看 rate），rule_type=2 按件固定金额（看 flat_amount）；按生效日期区间过滤，例如\"8月\"对应 effective_from=2026-08-01 且 effective_to=2026-08-31"
+  requires_time_filter: false

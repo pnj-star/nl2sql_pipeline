@@ -109,6 +109,7 @@ class ExecutorQuery:
         cache_scope: 执行侧缓存命名空间。
         cache_ttl: 执行侧缓存 TTL；None 表示用执行器自身策略。
         max_rows: 行数上限。
+        db_id: 目标数据源 ID。
     """
 
     query: str = ""
@@ -117,6 +118,7 @@ class ExecutorQuery:
     cache_scope: str = "structured_query"
     cache_ttl: int | None = None
     max_rows: int | None = None
+    db_id: str = ""
 
 
 @runtime_checkable
