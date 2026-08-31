@@ -71,7 +71,7 @@ description: 面向 agent 的 MySQL 自然语言转 SQL 工具。传入用户问
 {
   "status": "generated",
   "ok": true,
-  "query": "上月华东区GMV",
+  "query": "你们产品有什么",
   "sql": "SELECT SUM(amount) FROM orders WHERE ...",
   "confidence": 0.92,
   "used_tables": ["orders"],
@@ -85,7 +85,7 @@ description: 面向 agent 的 MySQL 自然语言转 SQL 工具。传入用户问
   "tenant_id": "t1",
   "db_id": "erp",
   "request_id": "req-42",
-  "trace_id": "trc-...",
+  "trace_id": "",
   "message": "",
   "audit": {}
 }
