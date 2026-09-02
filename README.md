@@ -49,15 +49,6 @@ flowchart TD
 docker pull ghcr.io/pnj-star/nl2sql_pipeline:v0.1.4
 ```
 
-准备 `.env`（复制 [.env.example](.env.example) 后填写），至少包含：
-
-```text
-NL2SQL_LLM_BASE_URL=
-NL2SQL_LLM_API_KEY=
-NL2SQL_LLM_MODEL=
-NL2SQL_DB_ERP_DSN=mysql://ro_user:ro_pass@host.docker.internal:3307/erp_db
-AUTH_MODE=disabled
-```
 
 启动并验证：
 
@@ -68,20 +59,12 @@ docker logs nl2sql
 docker stop nl2sql
 ```
 
-- 健康检查：`http://127.0.0.1:8000/health`
-- MCP streamable-http 地址：`http://127.0.0.1:8000/streamable`
-- 镜像默认监听 `0.0.0.0:8000`，入口命令为 `nl2sql-skill-mcp`
-- Windows/macOS 访问宿主机 MySQL/LLM 使用 `host.docker.internal`
-- 本地构建验证可改为：`docker build -t nl2sql-skill:test .`
 
 ## 本地开发
-
-以下命令在已克隆并进入 `nl2sql_skill` 目录后执行（不要重复 `cd nl2sql_skill`）：
-
-```bash
+```
 python -m venv .venv
 pip install -e ".[sql,semantic,mcp,test]"
-Copy-Item .env.example .env   # Windows；Linux/macOS 用 cp .env.example .env
+Copy-Item .env.example .env   
 ```
 
 最小调用示例：
@@ -93,10 +76,10 @@ from nl2sql_skill.types import NL2SQLRequest
 async def main():
     result = await build_nl2sql_pipeline().generate(
         NL2SQLRequest(
-            query="上个月华东区销售额 TOP10 的门店",
-            tenant_id="t1",
-            db_id="erp",
-            request_id="req-1",
+            query="介绍一下羊肚菌的优点，以及它的押金是多少",
+            tenant_id="",
+            db_id="",
+            request_id="",
         )
     )
     print(result.status, result.sql)
